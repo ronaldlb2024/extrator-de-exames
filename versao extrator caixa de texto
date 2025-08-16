@@ -1,37 +1,206 @@
 (function(){
-  // ===== EXTRACTOR – Caixa de Texto (VERSÃO ESTENDIDA v2) =====
-  // Ajustado para: Leuco sempre como 2º item, DASA (linha com % e valor absoluto), mais marcadores.
+  // ===== EXTRACTOR – Caixa de Texto (VERSÃO ESTENDIDA) =====
+  // Fluxo: F12 → Console → cole este script → ENTER
+  // 1) Cole o laudo bruto (PDF/Completo/Evolutivo) na caixa superior
+  // 2) Clique "Extrair" → revisão na caixa de saída
+  // 3) "Adicionar ao compilado" para montar Leito 1..N (em localStorage)
+  // 4) "Exportar .txt" quando finalizar
 
-  const OLD=document.getElementById('lab-panel-textbox');if(OLD)OLD.remove();
-  const wrap=document.createElement('div');
-  wrap.id='lab-panel-textbox';
-  wrap.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
-  wrap.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong>Extrator de Exames – Caixa de Texto (Estendido v2)</strong><div><button id="lab-close">Fechar</button></div></div>
-  <div style="display:grid;grid-template-columns:1fr;gap:8px">
-  <label>Cole laudo:</label>
-  <textarea id="in" style="width:100%;height:180px"></textarea>
-  <div><button id="btn-extract">Extrair</button></div>
-  <label>Saída:</label>
-  <textarea id="out" style="width:100%;height:120px"></textarea>
-  <div><input id="paciente" placeholder="Paciente"/><button id="btn-add">Adicionar</button><button id="btn-copy">Copiar</button></div>
-  <label>Compilado:</label>
-  <textarea id="compiled" style="width:100%;height:140px" readonly></textarea>
-  <div><button id="btn-export">Exportar</button><button id="btn-clear">Limpar</button><span id="counter"></span></div>
-  </div>`;
+  // ---------- UI ----------
+  const OLD = document.getElementById('lab-panel-textbox'); if(OLD) OLD.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'lab-panel-textbox';
+  wrap.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong>Extrator de Exames – Caixa de Texto (Estendido)</strong>
+      <div><button id="lab-close">Fechar</button></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr;gap:8px">
+      <label style="opacity:.85">Cole aqui o laudo bruto (Ctrl+V):</label>
+      <textarea id="in" style="width:100%;height:180px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <div>
+        <button id="btn-extract" style="margin-right:8px">Extrair</button>
+        <button id="btn-clear-in" style="margin-right:8px">Limpar entrada</button>
+      </div>
+      <label style="opacity:.85">Saída (linha pronta):</label>
+      <textarea id="out" style="width:100%;height:140px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <div>
+        <input id="paciente" placeholder="Nome do paciente (opcional)" style="width:60%;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:6px;margin-right:8px"/>
+        <button id="btn-add" style="margin-right:8px">Adicionar ao compilado</button>
+        <button id="btn-copy" style="margin-right:8px">Copiar saída</button>
+      </div>
+      <label style="opacity:.85">Compilado (Leito 1..N):</label>
+      <textarea id="compiled" style="width:100%;height:160px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px" readonly></textarea>
+      <div>
+        <button id="btn-export" style="margin-right:8px">Exportar .txt</button>
+        <button id="btn-clear" style="margin-right:8px">Limpar compilado</button>
+        <span id="counter" style="opacity:.8"></span>
+      </div>
+    </div>`;
   document.body.appendChild(wrap);
   wrap.querySelector('#lab-close').onclick=()=>wrap.remove();
+  wrap.querySelector('#btn-clear-in').onclick=()=>{ wrap.querySelector('#in').value=''; };
 
-  const KEY='LAB_COMPILADO_CXT_V2B';
-  const load=()=>{try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]}};
-  const save=a=>localStorage.setItem(KEY,JSON.stringify(a));
-  const refresh=()=>{const arr=load().sort((a,b)=>a.slot-b.slot);wrap.querySelector('#compiled').value=arr.map(e=>`Leito ${e.slot}${e.nome? ' - '+e.nome:''}: ${e.line}`).join('\n');wrap.querySelector('#counter').textContent=`Itens: ${arr.length}`;};
+  // ---------- Persistência ----------
+  const KEY='LAB_COMPILADO_CXT_V2_EXT';
+  const load = ()=>{ try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]} };
+  const save = arr=> localStorage.setItem(KEY, JSON.stringify(arr));
+  const refreshCompiled = ()=>{
+    const arr = load().sort((a,b)=>a.slot-b.slot);
+    const txt = arr.map(e=>`Leito ${e.slot}${e.nome? ' - '+e.nome:''}: ${e.line}`).join('\n');
+    wrap.querySelector('#compiled').value = txt;
+    wrap.querySelector('#counter').textContent = `Itens: ${arr.length}`;
+  };
 
-  const norm=t=>t.replace(/\r/g,'').replace(/\u00A0/g,' ').replace(/[ ]{2,}/g,' ');
-  const toNum=s=>{if(!s)return'';const v=parseFloat(String(s).replace(/\./g,'').replace(',','.'));return isNaN(v)?'':+v;};
+  // ---------- Helpers ----------
+  const norm = t => t.replace(/\r/g,'').replace(/[\u00A0\t]+/g,' ').replace(/[ ]{2,}/g,' ').replace(/\s+\n/g,'\n');
+  const toNum = s=>{ if(!s) return ''; const v=parseFloat(String(s).replace(/\./g,'').replace(',', '.')); return isNaN(v)?'':+v; };
+  const toNumKeepDot = s=>{ if(!s) return ''; const v=parseFloat(String(s).replace(',', '.')); return isNaN(v)?'':+v; };
+  const hasDateTime = s => /(\d{2}\/\d{2}\/\d{4}).*(\d{2}:\d{2})/s.test(s);
+  const flagsWithI = re => (re.flags && re.flags.includes('i')) ? re.flags : (re.flags||'')+'i';
+  const matchAfter = (T,labelRe, valueRe=/([0-9]+(?:[.,][0-9]+)?)/)=>{
+    const r = new RegExp(labelRe.source+"[\\t\\s:]*"+valueRe.source, flagsWithI(labelRe));
+    const m = T.match(r); return (m && m[1])? toNum(m[1]) : '';
+  };
+  const firstOnLine = (T,labelRE)=>{
+    const re = new RegExp('^.*'+labelRE.source+'.*$', 'im');
+    const m = T.match(re); if(!m) return '';
+    const line = m[0].replace(/\*.+$/, '').replace(/\b(at[eé]|de|até|a)\b.+$/i,'');
+    const all = [...line.matchAll(/([0-9]+(?:[.,][0-9]+)?)/g)].map(x=>x[1]);
+    return all.length? toNum(all[all.length-1]) : '';
+  };
+  const getValue = (T, labelRE, evol)=> matchAfter(T,labelRE) || (evol? firstOnLine(T,labelRE):'');
 
+  // Plaquetas com ajuste quando vier "/µL" (ex.: 307.000 /µL → 307)
+  const getPlaq = (T,evol)=>{
+    const reLine = /(Contagem\s*de\s*)?Plaquetas[^\n]*$/im;
+    const m = T.match(reLine);
+    if(m){
+      const line=m[0];
+      const numRaw = (line.match(/([0-9][\d\.,]*)/)||[])[1];
+      if(numRaw){
+        const val = toNumKeepDot(numRaw);
+        if(/\/(u|µ)l|\/µl|\/ul/i.test(line)){
+          return Math.round(val/1000);
+        }
+        return toNum(numRaw);
+      }
+    }
+    return getValue(T,/Plaquetas\b/i,evol);
+  };
+
+  // Gasometrias
+  function cutBlock(T,startRE){
+    const i = T.search(startRE); if(i<0) return '';
+    const tail = T.slice(i);
+    const stops = [/^\s*Gasometria\s*Arterial/im, /^\s*Gasometria\s*Venosa/im, /^\s*Gaso\s*Arterial/im, /^\s*Gaso\s*Venosa/im, /^\s*Hemograma/im, /^\s*Hematologia/im, /^\s*Bioqu/i, /^\s*Laudo\s+Comparativo/i, /^\s*Prote[ií]na\s*C\s*Reativa/im];
+    let end = tail.length; for(const s of stops){ const j = tail.slice(1).search(s); if(j>=0 && j+1<end) end=j+1; }
+    return tail.slice(0,end);
+  }
+  function numAfterIn(blk,labelRe){ if(!blk) return ''; const r=new RegExp(labelRe.source, flagsWithI(labelRe)); const m=r.exec(blk); if(!m) return ''; const idx=m.index+m[0].length; const slice=blk.slice(idx,idx+160); const n=slice.match(/(^|[\s:])([0-9]+(?:[.,][0-9]+)?)/); return n&&n[2]? toNum(n[2]):''; }
+  function gasFromBlock(T,isArt){
+    const blk = cutBlock(T, isArt?/Gasometria\s*Arterial|Gaso\s*Arterial/i:/Gasometria\s*Venosa|Gaso\s*Venosa/i);
+    const HCO3re=/HCO3\b|Bicarbonato\s*\(\s*HCO3\s*\)|Bicarbonato\(HCO3\)/i;
+    const BEre=/Excesso\s*de\s*Bases?|Base\s*Exces+|Base\s*excess/i;
+    const Sre=/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/i;
+    return { pH:numAfterIn(blk,/\bpH\b/i), pO2:numAfterIn(blk,/\bpO2\b/i), pCO2:numAfterIn(blk,/\bpCO2\b/i), HCO3:numAfterIn(blk,HCO3re), BE:numAfterIn(blk,BEre), Sat:numAfterIn(blk,Sre) };
+  }
+  function gasFromEvol(T,isArt){
+    const scope = isArt? /Gaso\s*Arterial/i : /Gaso\s*Venosa/i;
+    const blk = cutBlock(T,scope) || T;
+    function lastNum(label){ const r=new RegExp('^'+label+'[^\n]*$','im'); const m=blk.match(r); if(!m) return ''; const line=m[0].replace(/\*.+$/,''); const vals=[...line.matchAll(/([0-9]+(?:[.,][0-9]+)?)/g)].map(x=>x[1]); return vals.length? toNum(vals[vals.length-1]):''; }
+    return { pH:lastNum('pH'), pCO2:lastNum('pCO2'), HCO3:lastNum('HCO3'), BE:lastNum('Excesso de Bases|Base Exces|Base excess'), pO2:lastNum('pO2'), Sat:lastNum('Satura[çc][aã]o de O2') };
+  }
+
+  // ---------- Extrator principal ----------
   function extractLine(raw){
     if(!raw) return '';
-    const T=norm(raw);
-    const evol=/LAUDO\s+EVOLUTIVO/i.test(T)||/(\d{2}\/\d{2}\/\d{4}).*(\d{2}:\d{2})/s.test(T);
+    const T = norm(String(raw));
+    const isEvol = /LAUDO\s+EVOLUTIVO/i.test(T) || hasDateTime(T);
 
-    function findVal(re){const m=T.match(new RegExp(re.source+"[^0-9]*([0-9][\
+    // Hemograma e diferencial
+    const Hb    = getValue(T,/Hemoglobina\b/i, isEvol);
+    const Ht    = getValue(T,/Hemat[óo]crito\b/i, isEvol);
+    const Leuco = ( ()=>{ const m=T.match(/Leuc[óo]citos[^\n]*?([0-9][\d\.,]*)/i); if(m&&m[1]) return toNum(m[1]); return getValue(T,/Leuc[óo]citos\b/i, isEvol); })();
+    const Plaq  = getPlaq(T,isEvol);
+    const RDW   = getValue(T,/\bRDW\b/i, isEvol);
+    const Neutro= getValue(T,/Neutr[óo]filos\b/i, isEvol);
+    const Seg   = getValue(T,/Segmentados\b/i, isEvol);
+    const Linf  = getValue(T,/Linf[óo]citos\b/i, isEvol);
+    const Mono  = getValue(T,/Mon[óo]citos\b/i, isEvol);
+    const Eos   = getValue(T,/Eosin[óo]filos\b/i, isEvol);
+    const Baso  = getValue(T,/Bas[óo]filos\b/i, isEvol);
+
+    // Bioquímica
+    const URE = getValue(T,/Ure[ií]a|Uréia/i, isEvol);
+    const CRE = ( ()=>{ const m=T.match(/\bCreatinina\b[^\n]*?([0-9][\d\.,]*)/i); if(m) return toNum(m[1]); return getValue(T,/\bCreatinina\b/i, isEvol); })();
+    const NA  = getValue(T,/S[óo]dio\b/i, isEvol);
+    const K   = getValue(T,/Pot[áa]ssio\b/i, isEvol);
+    const MG  = getValue(T,/Magn[eé]sio\b/i, isEvol);
+    const CAI = getValue(T,/C[áa]lci[ou]\s*Ioniz|Calcio\s*I[oô]nico/i, isEvol);
+    const GLI = getValue(T,/\bGlicose\b/i, isEvol);
+    const LAC = getValue(T,/Lactato\b|Ácido\s*L[aá]ctico/i, isEvol);
+    const PCR = getValue(T,/Prote[ií]na\s*C\s*Reativa\b|\bPCR\b(?!\w)/i, isEvol);
+    const TnI = getValue(T,/Troponina\b/i, isEvol);
+
+    // Coagulação
+    const RNI = getValue(T,/\bRNI\b|\bINR\b/i, isEvol);
+    const TTPA_rel = getValue(T,/Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?|Rela[çc][aã]o\s*TTPA/i, isEvol);
+
+    // Gasometrias
+    const GAb = gasFromBlock(T,true), GVb = gasFromBlock(T,false);
+    const GAe = isEvol? gasFromEvol(T,true):{};
+    const GVe = isEvol? gasFromEvol(T,false):{};
+    const pick=(a,b)=> a!==''?a:(b??'');
+    const GA = { pH:pick(GAb.pH,GAe.pH), pO2:pick(GAb.pO2,GAe.pO2), pCO2:pick(GAb.pCO2,GAe.pCO2), HCO3:pick(GAb.HCO3,GAe.HCO3), BE:pick(GAb.BE,GAe.BE), Sat:pick(GAb.Sat,GAe.Sat) };
+    const GV = { pH:pick(GVb.pH,GVe.pH), pO2:pick(GVb.pO2,GVe.pO2), pCO2:pick(GVb.pCO2,GVe.pCO2), HCO3:pick(GVb.HCO3,GVe.HCO3), BE:pick(GVb.BE,GVe.BE), Sat:pick(GVb.Sat,GVe.Sat) };
+
+    const tag=(k,v)=> v===''? '': `${k} ${v}`;
+
+    // Ordem pedida
+    const line = [
+      tag('Hb',Hb), tag('Ht',Ht), tag('Leuco',Leuco), tag('Plaq',Plaq),
+      tag('URE',URE), tag('CRE',CRE), tag('NA',NA), tag('K',K), tag('MG',MG), tag('CAI',CAI), tag('GLI',GLI),
+      tag('pH(a)',GA.pH), tag('pO2(a)',GA.pO2), tag('pCO2(a)',GA.pCO2), tag('HCO3(a)',GA.HCO3), tag('BE(a)',GA.BE), tag('SatO2(a)',GA.Sat),
+      tag('pH(v)',GV.pH), tag('pO2(v)',GV.pO2), tag('pCO2(v)',GV.pCO2), tag('HCO3(v)',GV.HCO3), tag('BE(v)',GV.BE), tag('SatO2(v)',GV.Sat),
+      tag('LAC',LAC), tag('PCR',PCR), tag('TnI',TnI),
+      tag('RDW',RDW), tag('Neutro',Neutro), tag('Seg',Seg), tag('Linf',Linf), tag('Mono',Mono), tag('Eos',Eos), tag('Baso',Baso),
+      tag('RNI',RNI), tag('TTPA_rel',TTPA_rel)
+    ].filter(Boolean).join('; ');
+
+    return line;
+  }
+
+  // ---------- Botões ----------
+  wrap.querySelector('#btn-extract').onclick = ()=>{
+    const input = wrap.querySelector('#in').value;
+    const line = extractLine(input);
+    wrap.querySelector('#out').value = line || 'Nenhum exame reconhecido.';
+    console.log('[LAB] Linha →', line);
+  };
+
+  wrap.querySelector('#btn-copy').onclick = ()=>{
+    const text = wrap.querySelector('#out').value;
+    try{ if(navigator.clipboard && window.isSecureContext && document.hasFocus()) return navigator.clipboard.writeText(text); }catch(e){}
+    const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.top='-1000px'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  };
+
+  wrap.querySelector('#btn-add').onclick = ()=>{
+    const line = wrap.querySelector('#out').value.trim(); if(!line) return;
+    const nome = wrap.querySelector('#paciente').value.trim();
+    const arr = load();
+    const used = new Set(arr.map(e=>e.slot)); let slot=1; while(used.has(slot)) slot++;
+    arr.push({ ts: Date.now(), slot, nome, line }); save(arr); refreshCompiled();
+  };
+
+  wrap.querySelector('#btn-export').onclick=()=>{
+    const txt = wrap.querySelector('#compiled').value;
+    const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='compilado_exames.txt'; a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  wrap.querySelector('#btn-clear').onclick=()=>{ localStorage.removeItem(KEY); refreshCompiled(); };
+
+  refreshCompiled();
+})();
