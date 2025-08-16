@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Extrator de Exames</title>
+<style>
+  :root { color-scheme: dark; }
+  body{margin:0;background:#0b1220;color:#e7eefc;font:14px system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:960px;margin:24px auto;padding:0 16px}
+  h1{font-size:18px;margin:8px 0 16px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  textarea,input{width:100%;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px}
+  textarea{min-height:140px}
+  .btn{background:#1b2a56;border:1px solid #2c3e7a;border-radius:8px;color:#e7eefc;padding:8px 12px;cursor:pointer}
+  .btn:active{transform:translateY(1px)}
+  .grid{display:grid;gap:10px}
+  .two{grid-template-columns:1fr 1fr}
+  .muted{opacity:.8}
+  .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Extrator de Exames</h1>
+
+  <div class="grid">
+    <label>Laudo bruto (PDF/Evolutivo colado):</label>
+    <textarea id="in"></textarea>
+
+    <div class="row">
+      <button class="btn" id="btn-extract">Extrair</button>
+      <button class="btn" id="btn-clear-in">Limpar entrada</button>
+      <input id="paciente" placeholder="Nome do paciente (opcional)" style="flex:1 1 280px" />
+      <span class="muted" id="status"></span>
+    </div>
+
+    <label>Linha formatada (para evolução):</label>
+    <textarea id="out" class="mono" style="min-height:110px"></textarea>
+
+    <div class="row">
+      <button class="btn" id="btn-copy">Copiar saída</button>
+      <button class="btn" id="btn-add">Adicionar ao compilado (Leito N)</button>
+    </div>
+
+    <label>Compilado (persistente no navegador):</label>
+    <textarea id="compiled" class="mono" style="min-height:160px" readonly></textarea>
+
+    <div class="row">
+      <button class="btn" id="btn-export">Exportar .txt</button>
+      <button class="btn" id="btn-clear">Limpar compilado</button>
+      <span class="muted" id="counter"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ===== Persistência
+  const KEY='LAB_COMPILADO_SITE_V1';
+  const load = ()=>{ try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]} };
+  const save = arr=> localStorage.setItem(KEY, JSON.stringify(arr));
+
+  const $ = sel => document.querySelector(sel);
+  const setStatus = t => $('#status').textContent = t || '';
+
+  function refreshCompiled(){
+    const arr = load().sort((a,b)=>a.slot-b.slot);
+    const txt = arr.map(e=>`Leito ${e.slot}${e.nome? ' - '+e.nome:''}: ${e.line}`).join('\n');
+    $('#compiled').value = txt;
+    $('#counter').textContent = `Itens: ${arr.length}`;
+  }
+
+  // ===== Normalização & helpers
+  const norm = t => String(t||'')
+    .replace(/\r/g,'')
+    .replace(/[\u00A0\t]+/g,' ')
+    .replace(/[ ]{2,}/g,' ')
+    .replace(/\s+\n/g,'\n');
+
+  const toNum = s => {
+    if(!s) return '';
+    const v = parseFloat(String(s).replace(/\./g,'').replace(',', '.'));
+    return isNaN(v) ? '' : +v;
+  };
+
+  // Busca valor logo após um rótulo (com tolerância)
+  function matchAfter(T, labelRe, valueRe=/([0-9]+(?:[.,][0-9]+)?)/){
+    const r = new RegExp(labelRe.source+"[\\t\\s:]*"+valueRe.source, (labelRe.flags||'')+"i");
+    const m = T.match(r);
+    return (m && m[1]) ? toNum(m[1]) : '';
+  }
+  const grabFirst = (T,re)=> matchAfter(T,re);
+
+  // Pega o último número da linha contendo o rótulo — útil p/ evolutivo
+  function lastNumberOnLine(T, labelRE){
+    const re = new RegExp('^.*'+labelRE.source+'.*$', 'im');
+    const m = T.match(re); if(!m) return '';
+    const line = m[0].replace(/\*.+$/, '').replace(/\b(at[eé]|de|até|a)\b.+$/i,'');
+    const all = [...line.matchAll(/([0-9]+(?:[.,][0-9]+)?)/g)].map(x=>x[1]);
+    return all.length? toNum(all[all.length-1]) : '';
+  }
+
+  // Corta um bloco a partir de uma âncora até antes do próximo cabeçalho
+  function cut(T, startRE){
+    const i = T.search(startRE); if(i<0) return '';
+    const tail = T.slice(i);
+    const stops = [
+      /^\s*Gasometria\s*Arterial/im, /^\s*Gasometria\s*Venosa/im,
+      /^\s*Gaso\s*Arterial/im, /^\s*Gaso\s*Venosa/im,
+      /^\s*Hemograma/im, /^\s*Hematologia/im, /^\s*Bioqu/i,
+      /^\s*Laudo\s+Comparativo/i, /^\s*Prote[ií]na\s*C\s*Reativa/i
+    ];
+    let end = tail.length;
+    for(const s of stops){ const j = tail.slice(1).search(s); if(j>=0 && j+1<end) end=j+1; }
+    return tail.slice(0,end);
+  }
+
+  function numAfter(blk, labelRe){
+    if(!blk) return '';
+    const re = new RegExp(labelRe.source,(labelRe.flags||'')+'i');
+    const m = re.exec(blk); if(!m) return '';
+    const idx = m.index + m[0].length;
+    const slice = blk.slice(idx, idx+160);
+    const n = slice.match(/(^|[\s:])([0-9]+(?:[.,][0-9]+)?)/);
+    return n && n[2] ? toNum(n[2]) : '';
+  }
+
+  // ===== Extrator principal (funciona p/ completo e evolutivo)
+  function extractLine(raw){
+    if(!raw) return '';
+    const T0 = norm(raw);
+    const T = T0;
+    const hasEvol = /LAUDO\s+EVOLUTIVO/i.test(T) || /(\d{2}\/\d{2}\/\d{4}).*(\d{2}:\d{2})/s.test(T);
+
+    const getValue = (labelRE)=>{
+      return grabFirst(T,labelRE) || (hasEvol ? lastNumberOnLine(T,labelRE) : '');
+    };
+
+    // Hemograma
+    const Hb    = getValue(/Hemoglobina\b/i);
+    const Ht    = getValue(/Hemat[óo]crito\b/i);
+
+    // Leucócitos — prioriza valor absoluto no formato Dasa (linha com "% /µL")
+    const Leuco = (() => {
+      // Dasa: "Leucócitos 100 9.910 100 % 4.000 a 10.000 /µL"
+      const m = T.match(/Leuc[óo]citos[^\n]*?([0-9][\d\.,]*)\s*(?:\/µ?L|\/mm3|\b)/i);
+      if(m && m[1]) return toNum(m[1]);
+      return getValue(/Leuc[óo]citos\b/i);
+    })();
+
+    // Plaquetas — cobre “Contagem de Plaquetas 307.000 /µL”
+    const Plaq  = (() => {
+      const m = T.match(/(Contagem\s*de\s*)?Plaquetas[^\n]*?([0-9][\d\.,]*)/i);
+      if(m && m[2]) return toNum(m[2]);
+      return getValue(/Plaquetas\b/i);
+    })();
+
+    const RDW   = getValue(/\bRDW\b/i);
+    const Neutro= getValue(/Neutr[óo]filos\b/i);
+    const Seg   = getValue(/Segmentados\b/i);
+    const Linf  = getValue(/Linf[óo]citos\b/i);
+    const Mono  = getValue(/Mon[óo]citos\b/i);
+    const Eos   = getValue(/Eosin[óo]filos\b/i);
+    const Baso  = getValue(/Bas[óo]filos\b/i);
+
+    // Bioquímica
+    const URE = getValue(/Ure[ií]a|Uréia/i);
+    const CRE = (()=>{ // pega logo após “Creatinina …”
+      const m = T.match(/\bCreatinina\b[^\n]*?([0-9][\d\.,]*)/i);
+      if(m) return toNum(m[1]);
+      return hasEvol ? lastNumberOnLine(T,/\bCreatinina\b/i) : '';
+    })();
+    const NA  = getValue(/S[óo]dio\b/i);
+    const K   = getValue(/Pot[áa]ssio\b/i);
+    const MG  = getValue(/Magn[eé]sio\b/i);
+    const GLI = getValue(/\bGlicose\b/i);
+    const PCR = getValue(/Prote[ií]na\s*C\s*Reativa\b|\bPCR\b(?!\w)/i);
+    const CAI = getValue(/C[áa]lci[ou]\s*Ioniz|Calcio\s*I[oô]nico/i);
+    const LAC = getValue(/Lactato\b|Ácido\s*L[aá]ctico/i);
+    const TnI = getValue(/Troponina\b/i);
+
+    // Coagulação
+    const RNI = getValue(/\bRNI\b|\bINR\b/i);
+    const TTPA_rel = getValue(/Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?|Rela[çc][aã]o\s*TTPA/i);
+
+    // Gasos — blocos ou evolutivo
+    const gasA_blk = cut(T, /Gasometria\s*Arterial|Gaso\s*Arterial/i);
+    const gasV_blk = cut(T, /Gasometria\s*Venosa|Gaso\s*Venosa/i);
+
+    const HCO3re=/HCO3\b|Bicarbonato\s*\(\s*HCO3\s*\)|Bicarbonato\(HCO3\)/i;
+    const BEre  =/Base\s*Exces+|Excesso\s*de\s*base|Base\s*excess/i;
+    const Sre   =/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/i;
+
+    function gasFromBlock(blk){
+      return {
+        pH:   numAfter(blk,/\bpH\b/i),
+        pO2:  numAfter(blk,/\bpO2\b/i),
+        pCO2: numAfter(blk,/\bpCO2\b/i),
+        HCO3: numAfter(blk,HCO3re),
+        BE:   numAfter(blk,BEre),
+        Sat:  numAfter(blk,Sre)
+      };
+    }
+    function gasFromEvol(scopeRe){
+      const blk = cut(T, scopeRe) || T;
+      function lastNum(label){
+        const re = new RegExp('^'+label+'[^\n]*$', 'im');
+        const m = blk.match(re); if(!m) return '';
+        const line=m[0].replace(/\*.+$/,'');
+        const vals=[...line.matchAll(/([0-9]+(?:[.,][0-9]+)?)/g)].map(x=>x[1]);
+        return vals.length? toNum(vals[vals.length-1]):'';
+      }
+      return {
+        pH: lastNum('pH'),
+        pCO2: lastNum('pCO2'),
+        HCO3: lastNum('HCO3'),
+        BE: lastNum('Excesso de Bases|Base Exces|Base excess'),
+        pO2: lastNum('pO2'),
+        Sat: lastNum('Satura[çc][aã]o de O2')
+      };
+    }
+
+    const GA_block = gasFromBlock(gasA_blk), GV_block = gasFromBlock(gasV_blk);
+    const GA_evol  = hasEvol ? gasFromEvol(/Gaso\s*Arterial/i) : {};
+    const GV_evol  = hasEvol ? gasFromEvol(/Gaso\s*Venosa/i)  : {};
+    const pref = (a,b)=> a!==''?a:(b??'');
+
+    const GA = {
+      pH:   pref(GA_block.pH,   GA_evol.pH),
+      pO2:  pref(GA_block.pO2,  GA_evol.pO2),
+      pCO2: pref(GA_block.pCO2, GA_evol.pCO2),
+      HCO3: pref(GA_block.HCO3, GA_evol.HCO3),
+      BE:   pref(GA_block.BE,   GA_evol.BE),
+      Sat:  pref(GA_block.Sat,  GA_evol.Sat)
+    };
+    const GV = {
+      pH:   pref(GV_block.pH,   GV_evol.pH),
+      pO2:  pref(GV_block.pO2,  GV_evol.pO2),
+      pCO2: pref(GV_block.pCO2, GV_evol.pCO2),
+      HCO3: pref(GV_block.HCO3, GV_evol.HCO3),
+      BE:   pref(GV_block.BE,   GV_evol.BE),
+      Sat:  pref(GV_block.Sat,  GV_evol.Sat)
+    };
+
+    const tag = (k,v)=> v===''? '': `${k} ${v}`;
+    const line = [
+      tag('Hb',Hb), tag('Ht',Ht), tag('Leuco',Leuco), tag('Plaq',Plaq),
+      tag('URE',URE), tag('CRE',CRE), tag('NA',NA), tag('K',K), tag('MG',MG), tag('CAI',CAI), tag('GLI',GLI),
+      tag('pH(a)',GA.pH), tag('pO2(a)',GA.pO2), tag('pCO2(a)',GA.pCO2), tag('HCO3(a)',GA.HCO3), tag('BE(a)',GA.BE), tag('SatO2(a)',GA.Sat),
+      tag('pH(v)',GV.pH), tag('pO2(v)',GV.pO2), tag('pCO2(v)',GV.pCO2), tag('HCO3(v)',GV.HCO3), tag('BE(v)',GV.BE), tag('SatO2(v)',GV.Sat),
+      tag('LAC',LAC), tag('PCR',PCR), tag('TnI',TnI),
+      tag('RDW',RDW), tag('Neutro',Neutro), tag('Seg',Seg), tag('Linf',Linf), tag('Mono',Mono), tag('Eos',Eos), tag('Baso',Baso),
+      tag('RNI',RNI), tag('TTPA_rel',TTPA_rel)
+    ].filter(Boolean).join('; ');
+
+    return line;
+  }
+
+  // ===== Botões =====
+  $('#btn-clear-in').onclick = ()=> { $('#in').value=''; $('#out').value=''; setStatus(''); };
+
+  $('#btn-extract').onclick = ()=>{
+    const line = extractLine($('#in').value);
+    $('#out').value = line || 'Nenhum exame reconhecido.';
+    setStatus(line ? 'OK' : 'Nada extraído');
+    console.log('[Extrator] Linha:', line);
+  };
+
+  $('#btn-copy').onclick = ()=>{
+    const text = $('#out').value;
+    if(!text) return;
+    if(navigator.clipboard && window.isSecureContext){
+      navigator.clipboard.writeText(text).then(()=>setStatus('Copiado!')).catch(()=>fallbackCopy());
+    } else fallbackCopy();
+    function fallbackCopy(){
+      const ta=document.createElement('textarea');
+      ta.value=text; ta.style.position='fixed'; ta.style.top='-1000px';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      setStatus('Copiado!');
+    }
+  };
+
+  $('#btn-add').onclick = ()=>{
+    const line = $('#out').value.trim(); if(!line) return;
+    const nome = $('#paciente').value.trim();
+    const arr = load();
+    const used = new Set(arr.map(e=>e.slot));
+    let slot=1; while(used.has(slot)) slot++;
+    arr.push({ ts: Date.now(), slot, nome, line });
+    save(arr); refreshCompiled(); setStatus(`Adicionado (Leito ${slot})`);
+    $('#out').focus();
+  };
+
+  $('#btn-export').onclick = ()=>{
+    const txt = $('#compiled').value;
+    const blob = new Blob([txt],{type:'text/plain;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'compilado_exames.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus('Exportado.');
+  };
+
+  $('#btn-clear').onclick = ()=>{
+    localStorage.removeItem(KEY);
+    refreshCompiled(); setStatus('Compilado limpo.');
+  };
+
+  refreshCompiled();
+})();
+</script>
+</body>
+</html>
