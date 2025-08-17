@@ -1,0 +1,52 @@
+Proposta Técnica: Extrator de Exames Clínicos
+1. Resumo da Solução
+A proposta é um sistema web que permite ao paciente extrair dados padronizados de um exame em formato PDF e transferi-los de forma segura e imediata para o computador do médico no consultório. O sistema garante que nenhum dado sensível seja armazenado em servidores externos, usando uma arquitetura de transferência peer-to-peer (ponto-a-ponto) entre os navegadores.
+
+2. Arquitetura da Aplicação
+A arquitetura se baseia em duas interfaces principais: uma para o paciente (móvel) e outra para o médico (desktop), com um serviço de sinalização para conectar os dois.
+
+Front-end (Paciente): Uma aplicação web estática (HTML, CSS e JavaScript) hospedada no GitHub Pages. É acessada via QR Code no consultório.
+
+Front-end (Médico): Uma aplicação web estática similar, também hospedada no GitHub Pages, acessada em um navegador no computador do consultório.
+
+Serviço de Sinalização: Um serviço de baixo custo, como o Firebase Realtime Database ou Pusher, para coordenar a conexão entre os navegadores do paciente e do médico via WebRTC. O serviço não armazena dados de exames; ele apenas troca "sinais" de conexão entre as partes.
+
+3. Fluxo da Aplicação e Protocolos
+O fluxo de dados é dividido em duas etapas principais: a extração e a transferência.
+
+Etapa 1: Extração (No Navegador do Paciente)
+Acesso: O paciente escaneia um QR Code no consultório. A URL do QR Code leva para o front-end hospedado no GitHub Pages.
+
+Upload e Processamento: O paciente clica em um botão de upload para selecionar o arquivo PDF. Uma biblioteca JavaScript (ex: PDF.js) lê o PDF localmente, no navegador do paciente.
+
+Extração de Dados: O código do extrator (escrito em JavaScript) processa o texto do PDF, identificando e extraindo os dados padronizados de interesse.
+
+Criação da Sessão: O navegador do paciente se conecta ao serviço de sinalização e solicita uma nova sessão. O serviço retorna um código de sessão único (ex: 6 dígitos) e gera um identificador de conexão para o paciente.
+
+Exibição do Código: O código de sessão é exibido na tela do celular do paciente.
+
+Etapa 2: Transferência (Entre Navegadores)
+Sessão do Médico: O médico acessa uma URL específica (ex: .../receber) em seu computador e visualiza um campo para digitar o código de sessão.
+
+Início da Conexão: O médico digita o código de sessão que o paciente forneceu. O navegador do médico se conecta ao serviço de sinalização com esse código.
+
+Negociação WebRTC: O serviço de sinalização coordena a troca de informações entre os navegadores (paciente e médico) para estabelecer uma conexão direta, segura e criptografada via WebRTC.
+
+Transferência de Dados: O navegador do paciente envia os dados extraídos (em formato de texto ou JSON) diretamente para o navegador do médico pela conexão WebRTC.
+
+Exibição e Descarte: O navegador do médico recebe os dados e os exibe em um campo de texto. O médico copia e cola as informações no prontuário eletrônico. A conexão WebRTC é encerrada após a transferência, e os dados nunca persistem em nenhum servidor.
+
+4. Considerações Técnicas e de Segurança
+Segurança e Privacidade (LGPD): A arquitetura elimina o risco de vazamento de dados por meio de servidores de terceiros, já que a transferência é ponto-a-ponto e os dados de exames não são armazenados. O serviço de sinalização apenas troca informações de conexão.
+
+Tecnologias-Chave:
+
+Front-end: HTML5, CSS3, JavaScript ES6+.
+
+WebRTC: Para a conexão direta e criptografada.
+
+PDF.js: Biblioteca open-source para leitura de PDFs em JavaScript.
+
+Serviço de Sinalização: Firebase Realtime Database (ou similar) para a coordenação de sessões.
+
+Desafio de Implementação: A principal complexidade reside na correta configuração do WebRTC e na criação de um fluxo robusto para lidar com falhas de conexão. No entanto, é um padrão bem estabelecido para a transferência de dados em tempo real.
