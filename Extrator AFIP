@@ -1,27 +1,24 @@
 (function(){
-  // ===== EXTRACTOR – Caixa de Texto (AFIP-optimizado v5) =====
-  // Foco: ignorar "Anteriores"/"Laudo Comparativo"; priorizar "Resultado"; gaso venosa/arterial só no bloco correto;
-  // Hemograma robusto (Hb, Ht, Leuco, Plaq, RDW, diferencial); evitar falsos 2/3 vindos de faixas de referência.
+  // ===== EXTRACTOR – Caixa de Texto (VERSÃO 6) =====
 
-  // ---------- UI ----------
   const OLD = document.getElementById('lab-panel-textbox'); if(OLD) OLD.remove();
   const wrap = document.createElement('div');
   wrap.id = 'lab-panel-textbox';
   wrap.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <strong>Extrator de Exames – Caixa de Texto (AFIP v5)</strong>
+      <strong>Extrator de Exames – Caixa de Texto (v6)</strong>
       <div><button id="lab-close">Fechar</button></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr;gap:8px">
       <label style="opacity:.85">Cole aqui o laudo bruto (Ctrl+V):</label>
-      <textarea id="in" style="width:100%;height:200px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <textarea id="in" style="width:100%;height:180px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
       <div>
         <button id="btn-extract" style="margin-right:8px">Extrair</button>
         <button id="btn-clear-in" style="margin-right:8px">Limpar entrada</button>
       </div>
       <label style="opacity:.85">Saída (linha pronta):</label>
-      <textarea id="out" style="width:100%;height:160px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <textarea id="out" style="width:100%;height:140px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
       <div>
         <input id="paciente" placeholder="Nome do paciente (opcional)" style="width:60%;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:6px;margin-right:8px"/>
         <button id="btn-add" style="margin-right:8px">Adicionar ao compilado</button>
@@ -39,8 +36,7 @@
   wrap.querySelector('#lab-close').onclick=()=>wrap.remove();
   wrap.querySelector('#btn-clear-in').onclick=()=>{ wrap.querySelector('#in').value=''; };
 
-  // ---------- Persistência ----------
-  const KEY='LAB_COMPILADO_CXT_V5';
+  const KEY='LAB_COMPILADO_CXT_V6';
   const load = ()=>{ try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]} };
   const save = arr=> localStorage.setItem(KEY, JSON.stringify(arr));
   const refreshCompiled = ()=>{
@@ -50,202 +46,103 @@
     wrap.querySelector('#counter').textContent = `Itens: ${arr.length}`;
   };
 
-  // ---------- Helpers ----------
-  const norm = t => String(t)
-    .replace(/\r/g,'')
-    .replace(/[\u00A0\t]+/g,' ')
-    .replace(/[ ]{2,}/g,' ')
-    .replace(/\s+\n/g,'\n');
-
+  const norm = t => t.replace(/\r/g,'').replace(/[\u00A0\t]+/g,' ').replace(/[ ]{2,}/g,' ').replace(/\s+\n/g,'\n');
   const toNum = s=>{ if(!s) return ''; const v=parseFloat(String(s).replace(/\./g,'').replace(',', '.')); return isNaN(v)?'':+v; };
+  const toNumKeepDot = s=>{ if(!s) return ''; const v=parseFloat(String(s).replace(',', '.')); return isNaN(v)?'':+v; };
+  const matchBlockValue = (T,label)=>{ const re=new RegExp(label+"[\\s\\S]{0,80}?([0-9]+(?:[.,][0-9]+)?)",'i'); const m=T.match(re); return m? toNumKeepDot(m[1]):''; };
 
-  // Remove blocos de "Anteriores" e "Laudo Comparativo"
-  function stripComparatives(T){
-    T = T.replace(/^\s*Anteriores.*$/gim,'');
-    T = T.replace(/\n\s*Laudo\s+Comparativo[\s\S]*/im,'');
-    return T;
-  }
-
-  // Captura valor dentro de um bloco de prova com campo "Resultado"
-  function valueFromResultadoBlock(T, probeLabel){
-    const reStart = new RegExp(probeLabel,'i');
-    const i = T.search(reStart); if(i<0) return '';
-    const slice = T.slice(i, i+700);
-    const m = slice.match(/Resultado\s*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
-    if(m) return toNum(m[1]);
-    const m2 = slice.match(/Resultado[^\n]*?([0-9]+(?:[.,][0-9]+)?)/i);
-    if(m2) return toNum(m2[1]);
-    const m3 = slice.match(/\b([0-9]+(?:[.,][0-9]+)?)\b[\s\S]{0,40}\n\s*(?:mg\/dL|mmol\/L|g\/dL|%)?/i);
-    return m3? toNum(m3[1]):'';
-  }
-
-  // Gasometria – extrai apenas do bloco correto; pega a primeira linha numérica após o rótulo e antes de "Valor de referência"
-  function extractGasBlock(T, isArt){
-    const startRe = isArt? /Gasometria\s*Arterial|Gaso\s*Arterial/i : /Gasometria\s*Venosa|Gaso\s*Venosa/i;
-    const si = T.search(startRe); if(si<0) return null;
-    const tail = T.slice(si);
-    const end = tail.search(/\n\s*(?:Ureia|Creatinina|S[óo]dio|Pot[áa]ssio|Magn[eé]sio|Prote[ií]na\s*C\s*Reativa|Troponina|Tempo\s+e\s+atividade|RNI|Hemograma|Hematologia|Eritrograma)/i);
-    const blk = end>0 ? tail.slice(0,end) : tail;
-
-    function nextNumericAfter(labelRe){
-      const lines = blk.split(/\n+/);
-      let i = lines.findIndex(l=>labelRe.test(l));
-      if(i<0) return '';
-      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
-        const line = lines[k].trim();
-        if(/Valor\s+de\s+refer|\d+\s*-\s*\d+|mmHg|%|fL|pg|g\/?dL|Mil\/mm3|10\^6|10\s*\^\s*6/.test(line)) continue;
-        const m = line.match(/^([0-9]+(?:[.,][0-9]+)?)/);
-        if(m) return toNum(m[1]);
-      }
-      return '';
-    }
-
-    return {
-      pH:   nextNumericAfter(/\bpH\b|\bPH\b/i),
-      pO2:  nextNumericAfter(/\bpO2\b/i),
-      pCO2: nextNumericAfter(/\bpCO2\b/i),
-      HCO3: nextNumericAfter(/HCO3|Bicarbonato/i),
-      BE:   nextNumericAfter(/Excesso\s*de\s*Bases?|Base\s*Exces|Base\s*excess/i),
-      Sat:  nextNumericAfter(/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/i)
-    };
-  }
-
-  // HEMOGRAMA (AFIP): captura valores atuais e ignora faixas/anteriores
-  function extractHemograma(T){
-    const hStart = T.search(/Hemograma\s*Completo|Hematologia|Eritrograma/i);
-    if(hStart<0) return {};
-    const tail = T.slice(hStart);
-    const hEnd = tail.search(/\n\s*(?:Gasometria|Ureia|Creatinina|S[óo]dio|Pot[áa]ssio|Magn[eé]sio|Prote[ií]na\s*C\s*Reativa|Troponina|Tempo\s+e\s+atividade|RNI)/i);
-    const blk = hEnd>0? tail.slice(0,hEnd):tail;
-    const lines = blk.split(/\n+/);
-
-    function pick(label){
-      let i = lines.findIndex(l=> new RegExp(label,'i').test(l));
-      if(i<0) return '';
-      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
-        const L = lines[k].trim();
-        if(/Valores\s+de\s+Refer|\(.*\)|%|fL|pg|g\/?dL|Mil\/mm3|10\^6|\d+\s*-\s*\d+/.test(L)) continue;
-        const m = L.match(/^([0-9]+(?:[.,][0-9]+)?)/);
-        if(m) return toNum(m[1]);
-      }
-      return '';
-    }
-
-    function pickLeuco(){
-      let i = lines.findIndex(l=> /Leuc[óo]citos\b/i.test(l));
-      if(i<0) return '';
-      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
-        const L = lines[k].trim();
-        if(/Valores\s+de\s+Refer|\d+\s*-\s*\d+/.test(L)) continue;
-        const m = L.match(/^([0-9]+(?:[.,][0-9]+)?)/);
-        if(m) return toNum(m[1]);
-      }
-      return '';
-    }
-
-    return {
-      Hb: pick('Hemoglobina'),
-      Ht: pick('Hemat[óo]crito'),
-      Plaq: pick('Plaquetas'),
-      Leuco: pickLeuco(),
-      RDW: pick('RDW'),
-      Seg: pick('Segmentados'),
-      Neutro: pick('Neutr[óo]filos'),
-      Linf: pick('Linf[óo]citos\\s+t[íi]picos|Linf[óo]citos\\b'),
-      Mono: pick('Mon[óo]citos'),
-      Eos: pick('Eosin[óo]filos'),
-      Baso: pick('Bas[óo]filos')
-    };
-  }
-
-  function exists(re, T){ return re.test(T); }
-
-  // ---------- Extrator principal ----------
   function extractLine(raw){
     if(!raw) return '';
-    let T = norm(raw);
-    T = stripComparatives(T);
-
-    // Gasometrias
-    const hasArt = exists(/Gasometria\s*Arterial|Gaso\s*Arterial/i,T);
-    const hasVen = exists(/Gasometria\s*Venosa|Gaso\s*Venosa/i,T);
-    const GA = hasArt? extractGasBlock(T,true):null;
-    const GV = hasVen? extractGasBlock(T,false):null;
+    const T = norm(String(raw));
 
     // Hemograma
-    const HEM = extractHemograma(T);
+    const Hb    = matchBlockValue(T,'Hemoglobina');
+    const Ht    = matchBlockValue(T,'Hemat[oó]crito');
+    const Leuco = matchBlockValue(T,'Leuc[oó]citos');
+    const Plaq  = matchBlockValue(T,'Plaquetas');
+    const RDW   = matchBlockValue(T,'RDW');
 
-    // Bioquímica – prioriza "Resultado"
-    const URE = valueFromResultadoBlock(T, /Ure[ií]a|Uréia/);
-    const CRE = valueFromResultadoBlock(T, /Creatinina\b/);
-    const NA  = valueFromResultadoBlock(T, /S[óo]dio\b/);
-    const K   = valueFromResultadoBlock(T, /Pot[áa]ssio\b/);
-    const MG  = valueFromResultadoBlock(T, /Magn[eé]sio\b/);
-    const CAI = valueFromResultadoBlock(T, /C[áa]lci[ou]\s*Ioniz|C[aá]lcio\s*I[oô]nico/);
-    const PCR = valueFromResultadoBlock(T, /Prote[ií]na\s*C\s*Reativa|\bPCR\b/);
-    const TnI = valueFromResultadoBlock(T, /Troponina/i);
+    // Bioquímica
+    const URE = matchBlockValue(T,'Ureia|Uréia');
+    const CRE = matchBlockValue(T,'Creatinina');
+    const NA  = matchBlockValue(T,'S[oó]dio');
+    const K   = matchBlockValue(T,'Pot[áa]ssio');
+    const MG  = matchBlockValue(T,'Magn[eé]sio');
+    const CAI = matchBlockValue(T,'C[áa]lcio Ioniz|Calcio I[oô]nico');
+    const PCR = matchBlockValue(T,'Prote[ií]na C Reativa|PCR');
+    const TnI = matchBlockValue(T,'Troponina');
+
+    // TGO/TGP/CK
+    const TGO = matchBlockValue(T,'TGO|AST');
+    const TGP = matchBlockValue(T,'TGP|ALT');
+    const CK  = matchBlockValue(T,'Creatinofosfoquinase|CK');
+
+    // Lipidograma
+    const CTot = matchBlockValue(T,'Colesterol Total');
+    const HDL  = matchBlockValue(T,'Colesterol HDL');
+    const LDL  = matchBlockValue(T,'Colesterol LDL');
+    const VLDL = matchBlockValue(T,'Colesterol VLDL');
+    const TG   = matchBlockValue(T,'Triglic[ée]rides');
+
+    // Ferro / Ferritina
+    const Ferro     = matchBlockValue(T,'Ferro');
+    const Ferritina = matchBlockValue(T,'Ferritina');
+
+    // Hormônios
+    const TSH = matchBlockValue(T,'TSH');
+    const T4  = matchBlockValue(T,'T4(?!.*Livre)');
 
     // Coagulação
-    const RNI = (function(){
-      // procurar RNI em bloco próprio
-      const m = T.match(/\bRNI\b[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i) || T.match(/\bINR\b[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
-      return m? toNum(m[1]):'';
-    })();
-    const TTPA_rel = (function(){
-      const i = T.search(/TTPA\b|Trombo.*Parcial/i);
-      if(i>=0){
-        const sub = T.slice(i, i+700);
-        const m = sub.match(/Rela[çc][aã]o[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
-        if(m) return toNum(m[1]);
-      }
-      const m2 = T.match(/Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
-      return m2? toNum(m2[1]):'';
-    })();
+    const RNI = matchBlockValue(T,'RNI');
+    const TTPA_rel = matchBlockValue(T,'Rela[çc][aã]o paciente/normal|Rela[çc][aã]o TTPA');
 
-    const tag=(k,v)=> (v!=='' && v!=null)? `${k} ${v}`:'';
+    // TFG (expressa >90 se aparecer "Superior a 90")
+    let TFG='';
+    const mTFG = T.match(/TFG[\s\S]{0,40}(Superior a 90|[0-9]{1,3})/i);
+    if(mTFG){
+      if(/Superior a 90/i.test(mTFG[1])) TFG='>90'; else TFG=toNum(mTFG[1]);
+    }
 
-    const parts = [
-      tag('Hb',HEM.Hb), tag('Ht',HEM.Ht), tag('Leuco',HEM.Leuco), tag('Plaq',HEM.Plaq), tag('RDW',HEM.RDW),
+    const tag=(k,v)=> v===''? '': `${k} ${v}`;
+    const line=[
+      tag('Hb',Hb), tag('Ht',Ht), tag('Leuco',Leuco), tag('Plaq',Plaq), tag('RDW',RDW),
       tag('URE',URE), tag('CRE',CRE), tag('NA',NA), tag('K',K), tag('MG',MG), tag('CAI',CAI),
-      GA? tag('pH(a)',GA.pH):'', GA? tag('pO2(a)',GA.pO2):'', GA? tag('pCO2(a)',GA.pCO2):'', GA? tag('HCO3(a)',GA.HCO3):'', GA? tag('BE(a)',GA.BE):'', GA? tag('SatO2(a)',GA.Sat):'',
-      GV? tag('pH(v)',GV.pH):'', GV? tag('pO2(v)',GV.pO2):'', GV? tag('pCO2(v)',GV.pCO2):'', GV? tag('HCO3(v)',GV.HCO3):'', GV? tag('BE(v)',GV.BE):'', GV? tag('SatO2(v)',GV.Sat):'',
-      tag('PCR',PCR), tag('TnI',TnI), tag('RNI',RNI), tag('TTPA_rel',TTPA_rel)
-    ].filter(Boolean);
+      tag('PCR',PCR), tag('TnI',TnI), tag('RNI',RNI), tag('TTPA_rel',TTPA_rel),
+      tag('TGO',TGO), tag('TGP',TGP), tag('CK',CK),
+      tag('CTot',CTot), tag('HDL',HDL), tag('LDL',LDL), tag('VLDL',VLDL), tag('TG',TG),
+      tag('Ferro',Ferro), tag('Ferritina',Ferritina), tag('TSH',TSH), tag('T4',T4), tag('TFG',TFG)
+    ].filter(Boolean).join('; ');
 
-    const line = parts.join('; ');
-    console.log('[LAB] DEBUG', {HEM, URE, CRE, NA, K, MG, CAI, PCR, TnI, RNI, TTPA_rel, GA, GV});
     return line;
   }
 
-  // ---------- Botões ----------
-  wrap.querySelector('#btn-extract').onclick = ()=>{
+  wrap.querySelector('#btn-extract').onclick=()=>{
     const input = wrap.querySelector('#in').value;
     const line = extractLine(input);
     wrap.querySelector('#out').value = line || 'Nenhum exame reconhecido.';
     console.log('[LAB] Linha →', line);
   };
 
-  wrap.querySelector('#btn-copy').onclick = ()=>{
+  wrap.querySelector('#btn-copy').onclick=()=>{
     const text = wrap.querySelector('#out').value;
     try{ if(navigator.clipboard && window.isSecureContext && document.hasFocus()) return navigator.clipboard.writeText(text); }catch(e){}
     const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.top='-1000px'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
   };
 
-  wrap.querySelector('#btn-add').onclick = ()=>{
-    const line = wrap.querySelector('#out').value.trim(); if(!line) return;
-    const nome = wrap.querySelector('#paciente').value.trim();
-    const arr = load();
-    const used = new Set(arr.map(e=>e.slot)); let slot=1; while(used.has(slot)) slot++;
-    arr.push({ ts: Date.now(), slot, nome, line }); save(arr); refreshCompiled();
+  wrap.querySelector('#btn-add').onclick=()=>{
+    const line=wrap.querySelector('#out').value.trim(); if(!line) return;
+    const nome=wrap.querySelector('#paciente').value.trim();
+    const arr=load();
+    const used=new Set(arr.map(e=>e.slot)); let slot=1; while(used.has(slot)) slot++;
+    arr.push({ ts:Date.now(), slot, nome, line }); save(arr); refreshCompiled();
   };
 
   wrap.querySelector('#btn-export').onclick=()=>{
-    const txt = wrap.querySelector('#compiled').value;
+    const txt=wrap.querySelector('#compiled').value;
     const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='compilado_exames.txt'; a.click(); URL.revokeObjectURL(a.href);
   };
 
   wrap.querySelector('#btn-clear').onclick=()=>{ localStorage.removeItem(KEY); refreshCompiled(); };
-
   refreshCompiled();
 })();
