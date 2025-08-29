@@ -1,6 +1,7 @@
 (function(){
-  // ===== EXTRACTOR – Caixa de Texto (AFIP-optimizado v4) =====
-  // Foco desta versão: ignorar "Anteriores" / "Laudo Comparativo"; priorizar campo "Resultado"; corrigir Gasometria Venosa; evitar falsos "2"/"3".
+  // ===== EXTRACTOR – Caixa de Texto (AFIP-optimizado v5) =====
+  // Foco: ignorar "Anteriores"/"Laudo Comparativo"; priorizar "Resultado"; gaso venosa/arterial só no bloco correto;
+  // Hemograma robusto (Hb, Ht, Leuco, Plaq, RDW, diferencial); evitar falsos 2/3 vindos de faixas de referência.
 
   // ---------- UI ----------
   const OLD = document.getElementById('lab-panel-textbox'); if(OLD) OLD.remove();
@@ -9,7 +10,7 @@
   wrap.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <strong>Extrator de Exames – Caixa de Texto (AFIP v4)</strong>
+      <strong>Extrator de Exames – Caixa de Texto (AFIP v5)</strong>
       <div><button id="lab-close">Fechar</button></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr;gap:8px">
@@ -39,7 +40,7 @@
   wrap.querySelector('#btn-clear-in').onclick=()=>{ wrap.querySelector('#in').value=''; };
 
   // ---------- Persistência ----------
-  const KEY='LAB_COMPILADO_CXT_V4';
+  const KEY='LAB_COMPILADO_CXT_V5';
   const load = ()=>{ try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]} };
   const save = arr=> localStorage.setItem(KEY, JSON.stringify(arr));
   const refreshCompiled = ()=>{
@@ -60,39 +61,25 @@
 
   // Remove blocos de "Anteriores" e "Laudo Comparativo"
   function stripComparatives(T){
-    // remove linhas que começam com "Anteriores" (até o fim da linha)
     T = T.replace(/^\s*Anteriores.*$/gim,'');
-    // remove bloco Laudo Comparativo inteiro
     T = T.replace(/\n\s*Laudo\s+Comparativo[\s\S]*/im,'');
     return T;
   }
 
-  // Captura valor logo após o rótulo (até 3 linhas abaixo), ignorando faixas e %
-  function valueAfterLabel(T, label){
-    const re = new RegExp(label+"[\\s\\S]{0,120}?([0-9]+(?:[.,][0-9]+)?)\s*(?!%|ate|até|a\\s|mmHg|fL|pg|g\\/dL|g\\s*\\/\\s*dL.*-.*)|^([0-9]+(?:[.,][0-9]+)?$)",'i');
-    const m = re.exec(T); if(m) return toNum(m[1]||m[2]);
-    // fallback: primeira linha com label e, nas próximas 2 linhas, primeiro número
-    const reLine = new RegExp(label+'[^\n]*\n(?:[^\n]*\n)?([^\n]*)','i');
-    const m2 = reLine.exec(T); if(m2){ const n=(m2[1].match(/([0-9]+(?:[.,][0-9]+)?)/)||[])[1]; return toNum(n); }
-    return '';
-  }
-
-  // Captura "Resultado" dentro do bloco da prova (melhor para bioquímica AFIP)
+  // Captura valor dentro de um bloco de prova com campo "Resultado"
   function valueFromResultadoBlock(T, probeLabel){
-    // pega janela desde o label até "Valor de referência" ou 400 chars
     const reStart = new RegExp(probeLabel,'i');
     const i = T.search(reStart); if(i<0) return '';
-    const slice = T.slice(i, i+600);
+    const slice = T.slice(i, i+700);
     const m = slice.match(/Resultado\s*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
     if(m) return toNum(m[1]);
-    // fallback: primeiro número depois de Resultado:
     const m2 = slice.match(/Resultado[^\n]*?([0-9]+(?:[.,][0-9]+)?)/i);
     if(m2) return toNum(m2[1]);
-    // último fallback: valueAfterLabel na janela
-    return valueAfterLabel(slice, probeLabel);
+    const m3 = slice.match(/\b([0-9]+(?:[.,][0-9]+)?)\b[\s\S]{0,40}\n\s*(?:mg\/dL|mmol\/L|g\/dL|%)?/i);
+    return m3? toNum(m3[1]):'';
   }
 
-  // Gasometria: extrai apenas do bloco correto e entre o label e "Valor de referência"
+  // Gasometria – extrai apenas do bloco correto; pega a primeira linha numérica após o rótulo e antes de "Valor de referência"
   function extractGasBlock(T, isArt){
     const startRe = isArt? /Gasometria\s*Arterial|Gaso\s*Arterial/i : /Gasometria\s*Venosa|Gaso\s*Venosa/i;
     const si = T.search(startRe); if(si<0) return null;
@@ -100,24 +87,74 @@
     const end = tail.search(/\n\s*(?:Ureia|Creatinina|S[óo]dio|Pot[áa]ssio|Magn[eé]sio|Prote[ií]na\s*C\s*Reativa|Troponina|Tempo\s+e\s+atividade|RNI|Hemograma|Hematologia|Eritrograma)/i);
     const blk = end>0 ? tail.slice(0,end) : tail;
 
-    function val(label){
-      // janela local: do label até Valor de referência ou próximo label
-      const re = new RegExp(label,'i');
-      const ix = blk.search(re); if(ix<0) return '';
-      const sub = blk.slice(ix, ix+220);
-      const stop = sub.search(/Valor\s+de\s+refer[êe]ncia|\n\s*[A-Z][A-Za-z].*\n/i);
-      const win = stop>0 ? sub.slice(0,stop) : sub;
-      const m = win.match(/([0-9]+(?:[.,][0-9]+)?)/);
-      return m? toNum(m[1]):'';
+    function nextNumericAfter(labelRe){
+      const lines = blk.split(/\n+/);
+      let i = lines.findIndex(l=>labelRe.test(l));
+      if(i<0) return '';
+      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
+        const line = lines[k].trim();
+        if(/Valor\s+de\s+refer|\d+\s*-\s*\d+|mmHg|%|fL|pg|g\/?dL|Mil\/mm3|10\^6|10\s*\^\s*6/.test(line)) continue;
+        const m = line.match(/^([0-9]+(?:[.,][0-9]+)?)/);
+        if(m) return toNum(m[1]);
+      }
+      return '';
     }
 
     return {
-      pH:   val(/\bpH\b|\bPH\b/),
-      pO2:  val(/\bpO2\b/),
-      pCO2: val(/\bpCO2\b/),
-      HCO3: val(/HCO3|Bicarbonato/),
-      BE:   val(/Excesso\s*de\s*Bases?|Base\s*Exces|Base\s*excess/i),
-      Sat:  val(/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/)
+      pH:   nextNumericAfter(/\bpH\b|\bPH\b/i),
+      pO2:  nextNumericAfter(/\bpO2\b/i),
+      pCO2: nextNumericAfter(/\bpCO2\b/i),
+      HCO3: nextNumericAfter(/HCO3|Bicarbonato/i),
+      BE:   nextNumericAfter(/Excesso\s*de\s*Bases?|Base\s*Exces|Base\s*excess/i),
+      Sat:  nextNumericAfter(/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/i)
+    };
+  }
+
+  // HEMOGRAMA (AFIP): captura valores atuais e ignora faixas/anteriores
+  function extractHemograma(T){
+    const hStart = T.search(/Hemograma\s*Completo|Hematologia|Eritrograma/i);
+    if(hStart<0) return {};
+    const tail = T.slice(hStart);
+    const hEnd = tail.search(/\n\s*(?:Gasometria|Ureia|Creatinina|S[óo]dio|Pot[áa]ssio|Magn[eé]sio|Prote[ií]na\s*C\s*Reativa|Troponina|Tempo\s+e\s+atividade|RNI)/i);
+    const blk = hEnd>0? tail.slice(0,hEnd):tail;
+    const lines = blk.split(/\n+/);
+
+    function pick(label){
+      let i = lines.findIndex(l=> new RegExp(label,'i').test(l));
+      if(i<0) return '';
+      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
+        const L = lines[k].trim();
+        if(/Valores\s+de\s+Refer|\(.*\)|%|fL|pg|g\/?dL|Mil\/mm3|10\^6|\d+\s*-\s*\d+/.test(L)) continue;
+        const m = L.match(/^([0-9]+(?:[.,][0-9]+)?)/);
+        if(m) return toNum(m[1]);
+      }
+      return '';
+    }
+
+    function pickLeuco(){
+      let i = lines.findIndex(l=> /Leuc[óo]citos\b/i.test(l));
+      if(i<0) return '';
+      for(let k=i+1;k<Math.min(i+6,lines.length);k++){
+        const L = lines[k].trim();
+        if(/Valores\s+de\s+Refer|\d+\s*-\s*\d+/.test(L)) continue;
+        const m = L.match(/^([0-9]+(?:[.,][0-9]+)?)/);
+        if(m) return toNum(m[1]);
+      }
+      return '';
+    }
+
+    return {
+      Hb: pick('Hemoglobina'),
+      Ht: pick('Hemat[óo]crito'),
+      Plaq: pick('Plaquetas'),
+      Leuco: pickLeuco(),
+      RDW: pick('RDW'),
+      Seg: pick('Segmentados'),
+      Neutro: pick('Neutr[óo]filos'),
+      Linf: pick('Linf[óo]citos\\s+t[íi]picos|Linf[óo]citos\\b'),
+      Mono: pick('Mon[óo]citos'),
+      Eos: pick('Eosin[óo]filos'),
+      Baso: pick('Bas[óo]filos')
     };
   }
 
@@ -129,19 +166,16 @@
     let T = norm(raw);
     T = stripComparatives(T);
 
-    // Gasometria – detectar quais existem
+    // Gasometrias
     const hasArt = exists(/Gasometria\s*Arterial|Gaso\s*Arterial/i,T);
     const hasVen = exists(/Gasometria\s*Venosa|Gaso\s*Venosa/i,T);
     const GA = hasArt? extractGasBlock(T,true):null;
     const GV = hasVen? extractGasBlock(T,false):null;
 
-    // Hemograma básico – pegar primeiro número após cada rótulo
-    const Hb   = valueAfterLabel(T, /Hemoglobina/);
-    const Ht   = valueAfterLabel(T, /Hemat[óo]crito/);
-    const Plaq = valueAfterLabel(T, /Plaquetas/);
-    const Leuco= valueAfterLabel(T, /Leuc[óo]citos\b(?!.*\%)/);
+    // Hemograma
+    const HEM = extractHemograma(T);
 
-    // Bioquímica – prioriza campo "Resultado"
+    // Bioquímica – prioriza "Resultado"
     const URE = valueFromResultadoBlock(T, /Ure[ií]a|Uréia/);
     const CRE = valueFromResultadoBlock(T, /Creatinina\b/);
     const NA  = valueFromResultadoBlock(T, /S[óo]dio\b/);
@@ -151,23 +185,27 @@
     const PCR = valueFromResultadoBlock(T, /Prote[ií]na\s*C\s*Reativa|\bPCR\b/);
     const TnI = valueFromResultadoBlock(T, /Troponina/i);
 
-    // Coagulação – pegar RNI e Relação TTPA mesmo em blocos separados
-    const RNI = valueAfterLabel(T, /\bRNI\b|\bINR\b/);
+    // Coagulação
+    const RNI = (function(){
+      // procurar RNI em bloco próprio
+      const m = T.match(/\bRNI\b[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i) || T.match(/\bINR\b[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
+      return m? toNum(m[1]):'';
+    })();
     const TTPA_rel = (function(){
-      // procurar linha da relação dentro do bloco TTPA
       const i = T.search(/TTPA\b|Trombo.*Parcial/i);
       if(i>=0){
-        const sub = T.slice(i, i+600);
+        const sub = T.slice(i, i+700);
         const m = sub.match(/Rela[çc][aã]o[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
         if(m) return toNum(m[1]);
       }
-      return valueAfterLabel(T, /Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?|Rela[çc][aã]o\s*TTPA/);
+      const m2 = T.match(/Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?[^\n]*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
+      return m2? toNum(m2[1]):'';
     })();
 
     const tag=(k,v)=> (v!=='' && v!=null)? `${k} ${v}`:'';
 
     const parts = [
-      tag('Hb',Hb), tag('Ht',Ht), tag('Leuco',Leuco), tag('Plaq',Plaq),
+      tag('Hb',HEM.Hb), tag('Ht',HEM.Ht), tag('Leuco',HEM.Leuco), tag('Plaq',HEM.Plaq), tag('RDW',HEM.RDW),
       tag('URE',URE), tag('CRE',CRE), tag('NA',NA), tag('K',K), tag('MG',MG), tag('CAI',CAI),
       GA? tag('pH(a)',GA.pH):'', GA? tag('pO2(a)',GA.pO2):'', GA? tag('pCO2(a)',GA.pCO2):'', GA? tag('HCO3(a)',GA.HCO3):'', GA? tag('BE(a)',GA.BE):'', GA? tag('SatO2(a)',GA.Sat):'',
       GV? tag('pH(v)',GV.pH):'', GV? tag('pO2(v)',GV.pO2):'', GV? tag('pCO2(v)',GV.pCO2):'', GV? tag('HCO3(v)',GV.HCO3):'', GV? tag('BE(v)',GV.BE):'', GV? tag('SatO2(v)',GV.Sat):'',
@@ -175,10 +213,7 @@
     ].filter(Boolean);
 
     const line = parts.join('; ');
-
-    // Debug opcional
-    console.log('[LAB] DEBUG', {Hb,Ht,Leuco,Plaq,URE,CRE,NA,K,MG,CAI,PCR,TnI,RNI,TTPA_rel, GA, GV});
-
+    console.log('[LAB] DEBUG', {HEM, URE, CRE, NA, K, MG, CAI, PCR, TnI, RNI, TTPA_rel, GA, GV});
     return line;
   }
 
