@@ -1,25 +1,26 @@
 (function(){
-  // ===== EXTRACTOR – Caixa de Texto (AFIP-optimizado v3) =====
-  // Melhorias: identificação correta de gaso arterial/venosa; captura RNI, TTPA_rel; evita valores fictícios "2" quando gaso não existe.
+  // ===== EXTRACTOR – Caixa de Texto (AFIP-optimizado v4) =====
+  // Foco desta versão: ignorar "Anteriores" / "Laudo Comparativo"; priorizar campo "Resultado"; corrigir Gasometria Venosa; evitar falsos "2"/"3".
 
+  // ---------- UI ----------
   const OLD = document.getElementById('lab-panel-textbox'); if(OLD) OLD.remove();
   const wrap = document.createElement('div');
   wrap.id = 'lab-panel-textbox';
   wrap.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
   wrap.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <strong>Extrator de Exames – Caixa de Texto (AFIP v3)</strong>
+      <strong>Extrator de Exames – Caixa de Texto (AFIP v4)</strong>
       <div><button id="lab-close">Fechar</button></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr;gap:8px">
       <label style="opacity:.85">Cole aqui o laudo bruto (Ctrl+V):</label>
-      <textarea id="in" style="width:100%;height:180px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <textarea id="in" style="width:100%;height:200px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
       <div>
         <button id="btn-extract" style="margin-right:8px">Extrair</button>
         <button id="btn-clear-in" style="margin-right:8px">Limpar entrada</button>
       </div>
       <label style="opacity:.85">Saída (linha pronta):</label>
-      <textarea id="out" style="width:100%;height:140px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <textarea id="out" style="width:100%;height:160px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
       <div>
         <input id="paciente" placeholder="Nome do paciente (opcional)" style="width:60%;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:6px;margin-right:8px"/>
         <button id="btn-add" style="margin-right:8px">Adicionar ao compilado</button>
@@ -37,7 +38,8 @@
   wrap.querySelector('#lab-close').onclick=()=>wrap.remove();
   wrap.querySelector('#btn-clear-in').onclick=()=>{ wrap.querySelector('#in').value=''; };
 
-  const KEY='LAB_COMPILADO_CXT_V3';
+  // ---------- Persistência ----------
+  const KEY='LAB_COMPILADO_CXT_V4';
   const load = ()=>{ try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]} };
   const save = arr=> localStorage.setItem(KEY, JSON.stringify(arr));
   const refreshCompiled = ()=>{
@@ -47,70 +49,151 @@
     wrap.querySelector('#counter').textContent = `Itens: ${arr.length}`;
   };
 
-  const norm = t => t.replace(/\r/g,'').replace(/[\u00A0\t]+/g,' ').replace(/[ ]{2,}/g,' ').replace(/\s+\n/g,'\n');
+  // ---------- Helpers ----------
+  const norm = t => String(t)
+    .replace(/\r/g,'')
+    .replace(/[\u00A0\t]+/g,' ')
+    .replace(/[ ]{2,}/g,' ')
+    .replace(/\s+\n/g,'\n');
+
   const toNum = s=>{ if(!s) return ''; const v=parseFloat(String(s).replace(/\./g,'').replace(',', '.')); return isNaN(v)?'':+v; };
 
-  // Detecta gaso
-  function detectGasBlocks(T){
-    const art = /Gasometria\s*Arterial|Gaso\s*Arterial/i.test(T);
-    const ven = /Gasometria\s*Venosa|Gaso\s*Venosa/i.test(T);
-    return {hasArt:art, hasVen:ven};
-  }
-  function extractGas(T,isArt){
-    const scope = isArt? /Gasometria\s*Arterial|Gaso\s*Arterial/i:/Gasometria\s*Venosa|Gaso\s*Venosa/i;
-    const blkMatch = T.split(/\n/).filter(l=>scope.test(l))[0];
-    if(!blkMatch) return {};
-    function findVal(label){
-      const re = new RegExp(label+'[^\n]*([0-9]+(?:[.,][0-9]+)?)','i');
-      const m = T.match(re); return m? toNum(m[1]):'';
-    }
-    return { pH:findVal('pH'), pO2:findVal('pO2'), pCO2:findVal('pCO2'), HCO3:findVal('HCO3|Bicarbonato'), BE:findVal('Excesso|Base'), Sat:findVal('Satur') };
+  // Remove blocos de "Anteriores" e "Laudo Comparativo"
+  function stripComparatives(T){
+    // remove linhas que começam com "Anteriores" (até o fim da linha)
+    T = T.replace(/^\s*Anteriores.*$/gim,'');
+    // remove bloco Laudo Comparativo inteiro
+    T = T.replace(/\n\s*Laudo\s+Comparativo[\s\S]*/im,'');
+    return T;
   }
 
-  // Extrator principal
+  // Captura valor logo após o rótulo (até 3 linhas abaixo), ignorando faixas e %
+  function valueAfterLabel(T, label){
+    const re = new RegExp(label+"[\\s\\S]{0,120}?([0-9]+(?:[.,][0-9]+)?)\s*(?!%|ate|até|a\\s|mmHg|fL|pg|g\\/dL|g\\s*\\/\\s*dL.*-.*)|^([0-9]+(?:[.,][0-9]+)?$)",'i');
+    const m = re.exec(T); if(m) return toNum(m[1]||m[2]);
+    // fallback: primeira linha com label e, nas próximas 2 linhas, primeiro número
+    const reLine = new RegExp(label+'[^\n]*\n(?:[^\n]*\n)?([^\n]*)','i');
+    const m2 = reLine.exec(T); if(m2){ const n=(m2[1].match(/([0-9]+(?:[.,][0-9]+)?)/)||[])[1]; return toNum(n); }
+    return '';
+  }
+
+  // Captura "Resultado" dentro do bloco da prova (melhor para bioquímica AFIP)
+  function valueFromResultadoBlock(T, probeLabel){
+    // pega janela desde o label até "Valor de referência" ou 400 chars
+    const reStart = new RegExp(probeLabel,'i');
+    const i = T.search(reStart); if(i<0) return '';
+    const slice = T.slice(i, i+600);
+    const m = slice.match(/Resultado\s*\n\s*([0-9]+(?:[.,][0-9]+)?)/i);
+    if(m) return toNum(m[1]);
+    // fallback: primeiro número depois de Resultado:
+    const m2 = slice.match(/Resultado[^\n]*?([0-9]+(?:[.,][0-9]+)?)/i);
+    if(m2) return toNum(m2[1]);
+    // último fallback: valueAfterLabel na janela
+    return valueAfterLabel(slice, probeLabel);
+  }
+
+  // Gasometria: extrai apenas do bloco correto e entre o label e "Valor de referência"
+  function extractGasBlock(T, isArt){
+    const startRe = isArt? /Gasometria\s*Arterial|Gaso\s*Arterial/i : /Gasometria\s*Venosa|Gaso\s*Venosa/i;
+    const si = T.search(startRe); if(si<0) return null;
+    const tail = T.slice(si);
+    const end = tail.search(/\n\s*(?:Ureia|Creatinina|S[óo]dio|Pot[áa]ssio|Magn[eé]sio|Prote[ií]na\s*C\s*Reativa|Troponina|Tempo\s+e\s+atividade|RNI|Hemograma|Hematologia|Eritrograma)/i);
+    const blk = end>0 ? tail.slice(0,end) : tail;
+
+    function val(label){
+      // janela local: do label até Valor de referência ou próximo label
+      const re = new RegExp(label,'i');
+      const ix = blk.search(re); if(ix<0) return '';
+      const sub = blk.slice(ix, ix+220);
+      const stop = sub.search(/Valor\s+de\s+refer[êe]ncia|\n\s*[A-Z][A-Za-z].*\n/i);
+      const win = stop>0 ? sub.slice(0,stop) : sub;
+      const m = win.match(/([0-9]+(?:[.,][0-9]+)?)/);
+      return m? toNum(m[1]):'';
+    }
+
+    return {
+      pH:   val(/\bpH\b|\bPH\b/),
+      pO2:  val(/\bpO2\b/),
+      pCO2: val(/\bpCO2\b/),
+      HCO3: val(/HCO3|Bicarbonato/),
+      BE:   val(/Excesso\s*de\s*Bases?|Base\s*Exces|Base\s*excess/i),
+      Sat:  val(/Satura[çc][aã]o\s*de\s*O2|Sat\.?\s*O2|SatO2/)
+    };
+  }
+
+  function exists(re, T){ return re.test(T); }
+
+  // ---------- Extrator principal ----------
   function extractLine(raw){
     if(!raw) return '';
-    const T = norm(String(raw));
-    const {hasArt, hasVen} = detectGasBlocks(T);
+    let T = norm(raw);
+    T = stripComparatives(T);
 
-    const Hb = (T.match(/Hemoglobina[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const Ht = (T.match(/Hemat[óo]crito[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const Leuco = (T.match(/Leuc[óo]citos[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const Plaq = (T.match(/Plaquetas[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const URE = (T.match(/Ure[ií]a[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const CRE = (T.match(/Creatinina[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const NA = (T.match(/S[óo]dio[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const K = (T.match(/Pot[áa]ssio[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const MG = (T.match(/Magn[eé]sio[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const CAI = (T.match(/C[áa]lcio\s*Ion|Cálcio\s*I[oô]nico[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const PCR = (T.match(/Prote[ií]na\s*C\s*Reativa[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const TnI = (T.match(/Troponina[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const RNI = (T.match(/RNI[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
-    const TTPArel = (T.match(/Rela[çc][aã]o[^\n]*([0-9]+[.,][0-9]+)/i)||[])[1];
+    // Gasometria – detectar quais existem
+    const hasArt = exists(/Gasometria\s*Arterial|Gaso\s*Arterial/i,T);
+    const hasVen = exists(/Gasometria\s*Venosa|Gaso\s*Venosa/i,T);
+    const GA = hasArt? extractGasBlock(T,true):null;
+    const GV = hasVen? extractGasBlock(T,false):null;
 
-    const GA = hasArt? extractGas(T,true):{};
-    const GV = hasVen? extractGas(T,false):{};
+    // Hemograma básico – pegar primeiro número após cada rótulo
+    const Hb   = valueAfterLabel(T, /Hemoglobina/);
+    const Ht   = valueAfterLabel(T, /Hemat[óo]crito/);
+    const Plaq = valueAfterLabel(T, /Plaquetas/);
+    const Leuco= valueAfterLabel(T, /Leuc[óo]citos\b(?!.*\%)/);
 
-    const tag=(k,v)=> v?`${k} ${v}`:'';
+    // Bioquímica – prioriza campo "Resultado"
+    const URE = valueFromResultadoBlock(T, /Ure[ií]a|Uréia/);
+    const CRE = valueFromResultadoBlock(T, /Creatinina\b/);
+    const NA  = valueFromResultadoBlock(T, /S[óo]dio\b/);
+    const K   = valueFromResultadoBlock(T, /Pot[áa]ssio\b/);
+    const MG  = valueFromResultadoBlock(T, /Magn[eé]sio\b/);
+    const CAI = valueFromResultadoBlock(T, /C[áa]lci[ou]\s*Ioniz|C[aá]lcio\s*I[oô]nico/);
+    const PCR = valueFromResultadoBlock(T, /Prote[ií]na\s*C\s*Reativa|\bPCR\b/);
+    const TnI = valueFromResultadoBlock(T, /Troponina/i);
 
-    return [
+    // Coagulação – pegar RNI e Relação TTPA mesmo em blocos separados
+    const RNI = valueAfterLabel(T, /\bRNI\b|\bINR\b/);
+    const TTPA_rel = (function(){
+      // procurar linha da relação dentro do bloco TTPA
+      const i = T.search(/TTPA\b|Trombo.*Parcial/i);
+      if(i>=0){
+        const sub = T.slice(i, i+600);
+        const m = sub.match(/Rela[çc][aã]o[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
+        if(m) return toNum(m[1]);
+      }
+      return valueAfterLabel(T, /Rela[çc][aã]o\s*(?:paciente\s*\/\s*normal)?|Rela[çc][aã]o\s*TTPA/);
+    })();
+
+    const tag=(k,v)=> (v!=='' && v!=null)? `${k} ${v}`:'';
+
+    const parts = [
       tag('Hb',Hb), tag('Ht',Ht), tag('Leuco',Leuco), tag('Plaq',Plaq),
       tag('URE',URE), tag('CRE',CRE), tag('NA',NA), tag('K',K), tag('MG',MG), tag('CAI',CAI),
-      tag('pH(a)',GA.pH), tag('pO2(a)',GA.pO2), tag('pCO2(a)',GA.pCO2), tag('HCO3(a)',GA.HCO3), tag('BE(a)',GA.BE), tag('SatO2(a)',GA.Sat),
-      tag('pH(v)',GV.pH), tag('pO2(v)',GV.pO2), tag('pCO2(v)',GV.pCO2), tag('HCO3(v)',GV.HCO3), tag('BE(v)',GV.BE), tag('SatO2(v)',GV.Sat),
-      tag('PCR',PCR), tag('TnI',TnI), tag('RNI',RNI), tag('TTPA_rel',TTPArel)
-    ].filter(Boolean).join('; ');
+      GA? tag('pH(a)',GA.pH):'', GA? tag('pO2(a)',GA.pO2):'', GA? tag('pCO2(a)',GA.pCO2):'', GA? tag('HCO3(a)',GA.HCO3):'', GA? tag('BE(a)',GA.BE):'', GA? tag('SatO2(a)',GA.Sat):'',
+      GV? tag('pH(v)',GV.pH):'', GV? tag('pO2(v)',GV.pO2):'', GV? tag('pCO2(v)',GV.pCO2):'', GV? tag('HCO3(v)',GV.HCO3):'', GV? tag('BE(v)',GV.BE):'', GV? tag('SatO2(v)',GV.Sat):'',
+      tag('PCR',PCR), tag('TnI',TnI), tag('RNI',RNI), tag('TTPA_rel',TTPA_rel)
+    ].filter(Boolean);
+
+    const line = parts.join('; ');
+
+    // Debug opcional
+    console.log('[LAB] DEBUG', {Hb,Ht,Leuco,Plaq,URE,CRE,NA,K,MG,CAI,PCR,TnI,RNI,TTPA_rel, GA, GV});
+
+    return line;
   }
 
+  // ---------- Botões ----------
   wrap.querySelector('#btn-extract').onclick = ()=>{
     const input = wrap.querySelector('#in').value;
     const line = extractLine(input);
     wrap.querySelector('#out').value = line || 'Nenhum exame reconhecido.';
+    console.log('[LAB] Linha →', line);
   };
 
   wrap.querySelector('#btn-copy').onclick = ()=>{
     const text = wrap.querySelector('#out').value;
-    navigator.clipboard?.writeText(text);
+    try{ if(navigator.clipboard && window.isSecureContext && document.hasFocus()) return navigator.clipboard.writeText(text); }catch(e){}
+    const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.top='-1000px'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
   };
 
   wrap.querySelector('#btn-add').onclick = ()=>{
