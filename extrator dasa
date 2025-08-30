@@ -1,0 +1,312 @@
+// Adapted extractor for DASA laboratory exam reports.
+//
+// This script is based off of the original extractor (v6) but has been tuned
+// specifically for the formatting used in DASA exam PDFs.  The key changes
+// include:
+//   • Label patterns updated to match DASA nomenclature (e.g. "Uréia"
+//     instead of "Ureia", "Potássio" for potassium, etc.).
+//   • A slightly larger search window in the regular expression used by
+//     `matchBlockValue` to accommodate additional line breaks between the
+//     parameter name and its value in DASA reports.
+//   • Detection of the glomerular filtration rate (TFG/eGFR) using
+//     DASA‑specific wording (e.g. “Superior a 90 mL/min/1,73m²”).
+//
+// To use this extractor, open a DASA PDF report, copy the entire text of a
+// result page, and paste it into the input box.  The extractor will pull
+// out the most common laboratory values and format them into a single line
+// (e.g. "Hb 11.6; Ht 33.7; Potássio 4.1; …").
+
+/* eslint-disable no-irregular-whitespace */
+(function () {
+  // ===== EXTRACTOR – Caixa de Texto (DASA) =====
+  const OLD = document.getElementById('lab-panel-textbox');
+  if (OLD) OLD.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'lab-panel-textbox';
+  wrap.style.cssText =
+    'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e7eefc;border:1px solid #1f2b48;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:720px;width:720px;font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;padding:12px';
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong>Extrator de Exames – Caixa de Texto (DASA)</strong>
+      <div><button id="lab-close">Fechar</button></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr;gap:8px">
+      <label style="opacity:.85">Cole aqui o laudo bruto (Ctrl+V):</label>
+      <textarea id="in" style="width:100%;height:180px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <div>
+        <button id="btn-extract" style="margin-right:8px">Extrair</button>
+        <button id="btn-clear-in" style="margin-right:8px">Limpar entrada</button>
+      </div>
+      <label style="opacity:.85">Saída (linha pronta):</label>
+      <textarea id="out" style="width:100%;height:140px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px"></textarea>
+      <div>
+        <input id="paciente" placeholder="Nome do paciente (opcional)" style="width:60%;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:6px;margin-right:8px"/>
+        <button id="btn-add" style="margin-right:8px">Adicionar ao compilado</button>
+        <button id="btn-copy" style="margin-right:8px">Copiar saída</button>
+      </div>
+      <label style="opacity:.85">Compilado (Leito 1..N):</label>
+      <textarea id="compiled" style="width:100%;height:160px;border-radius:8px;background:#0f172a;color:#e7eefc;border:1px solid #27314e;padding:8px" readonly></textarea>
+      <div>
+        <button id="btn-export" style="margin-right:8px">Exportar .txt</button>
+        <button id="btn-clear" style="margin-right:8px">Limpar compilado</button>
+        <span id="counter" style="opacity:.8"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelector('#lab-close').onclick = () => wrap.remove();
+  wrap.querySelector('#btn-clear-in').onclick = () => {
+    wrap.querySelector('#in').value = '';
+  };
+
+  // Local storage key for compiled lines
+  const KEY = 'LAB_COMPILADO_CXT_V6';
+  const load = () => {
+    try {
+      return JSON.parse(localStorage.getItem(KEY) || '[]');
+    } catch (e) {
+      return [];
+    }
+  };
+  const save = (arr) => localStorage.setItem(KEY, JSON.stringify(arr));
+  const refreshCompiled = () => {
+    const arr = load().sort((a, b) => a.slot - b.slot);
+    const txt = arr
+      .map((e) => `Leito ${e.slot}${e.nome ? ' - ' + e.nome : ''}: ${e.line}`)
+      .join('\n');
+    wrap.querySelector('#compiled').value = txt;
+    wrap.querySelector('#counter').textContent = `Itens: ${arr.length}`;
+  };
+
+  // Normalise whitespace: remove carriage returns, collapse multiple spaces, convert
+  // tab characters into single spaces and remove trailing spaces before newlines.
+  const norm = (t) =>
+    t
+      .replace(/\r/g, '')
+      .replace(/[\u00A0\t]+/g, ' ')
+      .replace(/[ ]{2,}/g, ' ')
+      .replace(/\s+\n/g, '\n');
+
+  // Convert a numeric string into a JavaScript number.  This helper will
+  // remove thousand separators (dots) and normalise commas to decimal points.
+  const toNum = (s) => {
+    if (!s) return '';
+    const v = parseFloat(String(s).replace(/\./g, '').replace(',', '.'));
+    return isNaN(v) ? '' : +v;
+  };
+  // Convert a numeric string into a number but keep the dot if present.  This
+  // helper is used for values like 4.600 (which should become 4.6) whereas
+  // commas are treated as decimal separators (e.g. 11,6 → 11.6).
+  const toNumKeepDot = (s) => {
+    if (!s) return '';
+    const v = parseFloat(String(s).replace(',', '.'));
+    return isNaN(v) ? '' : +v;
+  };
+
+  /**
+   * Find a laboratory value given a label.  The label can be a simple string
+   * or a regular expression.  This function searches forward up to 120
+   * characters (including newlines) after the label and returns the first
+   * numeric value found.  Decimal commas and decimal points are supported.
+   *
+   * @param {string} T Normalised text to search in.
+   * @param {string} label Regular expression string describing the label.
+   * @returns {number|string} The numeric value found or an empty string.
+   */
+  function matchBlockValue(T, label) {
+    // Increase the look‑ahead window from 80 to 120 characters to handle
+    // additional line breaks in DASA reports.  The non‑capturing group
+    // [\s\S] matches any character, including newlines.
+    const re = new RegExp(
+      label + '[\\s\\S]{0,120}?([0-9]+(?:[.,][0-9]+)?)',
+      'i'
+    );
+    const m = T.match(re);
+    return m ? toNumKeepDot(m[1]) : '';
+  }
+
+  /**
+   * Extracts a single line of formatted results from the raw report text.
+   * Each entry is of the form "KEY value" (for example "Hb 11.6").  Only
+   * fields with detected values are included in the final string.  The order
+   * follows a logical grouping: haemogram, biochemistry, liver enzymes,
+   * lipidogram, iron studies, hormones, coagulation and renal function.
+   *
+   * @param {string} raw Raw text pasted by the user.
+   * @returns {string} A semicolon‑separated list of results or an empty
+   *   message if nothing was recognised.
+   */
+  function extractLine(raw) {
+    if (!raw) return '';
+    const T = norm(String(raw));
+
+    // Haemogram
+    const Hb = matchBlockValue(T, 'Hemoglobina');
+    const Ht = matchBlockValue(T, 'Hemat[oó]crito');
+    const Leuco = matchBlockValue(T, 'Leuc[oó]citos');
+    const Plaq = matchBlockValue(T, 'Plaquetas');
+    const RDW = matchBlockValue(T, 'RDW');
+
+    // Basic biochemistry
+    // Note: wrap alternative patterns in a non‑capturing group (?: … ) to
+    // ensure the subsequent look‑ahead applies to all alternatives.  Without
+    // parentheses the alternation has lower precedence and only the last
+    // alternative would receive the look‑ahead when the regular expression is
+    // constructed (e.g. 'Uréia|Ureia' becomes 'Uréia' OR 'Ureia[...]').
+    const URE = matchBlockValue(T, '(?:Uréia|Ureia)');
+    const CRE = matchBlockValue(T, 'Creatinina');
+    const NA = matchBlockValue(T, 'S[óo]dio');
+    const K = matchBlockValue(T, 'Pot[áa]ssio');
+    const MG = matchBlockValue(T, 'Magn[eé]sio');
+    const CAI = matchBlockValue(
+      T,
+      '(?:C[áa]lcio Ioniz|Calcio I[oô]nico|Calcio Ionizado)'
+    );
+    const PCR = matchBlockValue(T, '(?:Prote[ií]na C Reativa|PCR)');
+    const TnI = matchBlockValue(T, 'Troponina');
+
+    // Liver enzymes and muscle markers
+    // AST (TGO) and ALT (TGP) may appear as synonyms in DASA reports.  Use
+    // simple labels to avoid accidental matches from unrelated abbreviations.
+    const TGO = matchBlockValue(T, '(?:TGO|AST)');
+    const TGP = matchBlockValue(T, 'TGP');
+    const CK = matchBlockValue(T, 'Creatinofosfoquinase|CK');
+
+    // Lipid panel
+    const CTot = matchBlockValue(T, 'Colesterol Total');
+    const HDL = matchBlockValue(T, 'HDL[\\s\-]*Colesterol');
+    // LDL result may appear as "LDL - Colesterol (calculado)" with the value
+    // appearing a few lines after.  The pattern below attempts to capture
+    // either "LDL" or "LDL - Colesterol".
+    const LDL = matchBlockValue(T, 'LDL[\\s\-]*Colesterol');
+    const VLDL = matchBlockValue(T, 'VLDL[\\s\-]*Colesterol');
+    const TG = matchBlockValue(T, 'Triglic[ée]rides');
+
+    // Iron metabolism
+    const Ferro = matchBlockValue(T, 'Ferro');
+    const Ferritina = matchBlockValue(T, 'Ferritina');
+
+    // Hormones
+    const TSH = matchBlockValue(T, 'TSH');
+    // Capture total T4 (not free).  Exclude "Livre" via a negative lookahead.
+    const T4 = matchBlockValue(T, 'T4(?![\s\S]*Livre)');
+
+    // Coagulation
+    const RNI = matchBlockValue(T, 'RNI');
+    const TTPA_rel = matchBlockValue(
+      T,
+      'Rela[çc][aã]o paciente/normal|Rela[çc][aã]o TTPA'
+    );
+
+    // Estimated glomerular filtration rate (eGFR/TFG).  DASA reports may use
+    // "eGFR" or express the concept as "Superior a 90".  If the qualifier
+    // indicates "Superior a 90", we report the value as ">90".  Otherwise
+    // the numeric value is returned directly.
+    let TFG = '';
+    // Match the estimated glomerular filtration rate.  Use a word‑boundary on
+    // the numeric value to avoid capturing digits from years (e.g. "2021").
+    const mTFG = T.match(
+      /(?:eGFR|TFG|Taxa de Filtra[çc][aã]o Glomerular)[\s\S]{0,40}(Superior\s+a\s+90|\b[0-9]{1,3}\b)/i
+    );
+    if (mTFG) {
+      if (/Superior\s+a\s+90/i.test(mTFG[1])) TFG = '>90';
+      else TFG = toNum(mTFG[1]);
+    }
+
+    // Helper to format key/value pairs; skip empty values.
+    const tag = (k, v) => (v === '' ? '' : `${k} ${v}`);
+    const parts = [];
+    parts.push(
+      tag('Hb', Hb),
+      tag('Ht', Ht),
+      tag('Leuco', Leuco),
+      tag('Plaq', Plaq),
+      tag('RDW', RDW),
+      tag('URE', URE),
+      tag('CRE', CRE),
+      tag('NA', NA),
+      tag('K', K),
+      tag('MG', MG),
+      tag('CAI', CAI),
+      tag('PCR', PCR),
+      tag('TnI', TnI),
+      tag('RNI', RNI),
+      tag('TTPA_rel', TTPA_rel),
+      tag('TGO', TGO),
+      tag('TGP', TGP),
+      tag('CK', CK),
+      tag('CTot', CTot),
+      tag('HDL', HDL),
+      tag('LDL', LDL),
+      tag('VLDL', VLDL),
+      tag('TG', TG),
+      tag('Ferro', Ferro),
+      tag('Ferritina', Ferritina),
+      tag('TSH', TSH),
+      tag('T4', T4),
+      tag('TFG', TFG)
+    );
+    // Filter out empty strings and join with semicolons.
+    const line = parts.filter(Boolean).join('; ');
+    return line;
+  }
+
+  // Extract button handler
+  wrap.querySelector('#btn-extract').onclick = () => {
+    const input = wrap.querySelector('#in').value;
+    const line = extractLine(input);
+    wrap.querySelector('#out').value = line || 'Nenhum exame reconhecido.';
+    console.log('[LAB] Linha →', line);
+  };
+
+  // Copy output to clipboard
+  wrap.querySelector('#btn-copy').onclick = () => {
+    const text = wrap.querySelector('#out').value;
+    try {
+      if (navigator.clipboard && window.isSecureContext && document.hasFocus())
+        return navigator.clipboard.writeText(text);
+    } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  };
+
+  // Add to compiled list
+  wrap.querySelector('#btn-add').onclick = () => {
+    const line = wrap.querySelector('#out').value.trim();
+    if (!line) return;
+    const nome = wrap.querySelector('#paciente').value.trim();
+    const arr = load();
+    const used = new Set(arr.map((e) => e.slot));
+    let slot = 1;
+    while (used.has(slot)) slot++;
+    arr.push({ ts: Date.now(), slot, nome, line });
+    save(arr);
+    refreshCompiled();
+  };
+
+  // Export compiled list to a .txt file
+  wrap.querySelector('#btn-export').onclick = () => {
+    const txt = wrap.querySelector('#compiled').value;
+    const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'compilado_exames.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  // Clear compiled list
+  wrap.querySelector('#btn-clear').onclick = () => {
+    localStorage.removeItem(KEY);
+    refreshCompiled();
+  };
+
+  // Initial refresh of compiled list
+  refreshCompiled();
+})();
